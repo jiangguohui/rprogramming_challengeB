@@ -1,13 +1,18 @@
 ---
-title: "challengeB"
+title: "ChallengeB"
 author: "Guohui Jiang; Jiayin Zhai"
 date: "11/25/2017"
 output: pdf_document
 ---
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+load.libraries <- c('tidyverse', 'randomForest','caret','data.table','np')
+install.lib <- load.libraries[!load.libraries %in% installed.packages()]
+for(libs in install.lib) install.packages(libs, dependencies = TRUE)
+sapply(load.libraries, require, character = TRUE)
 ```
+Github link [__here__](https://github.com/jiangguohui/rprogramming_challengeB)
+
 # Task 1B - Predicting house price in Ames, Lowa (continued)
 ## Step 1
 The intuition behind Random Forests: we randomly split the training data into some subsamples, then we will use models to predict the observations of each subsample. The final prediction should be a function of each prediction. For example, we have 10,000 observations in the training data, then we randomly divide it into 100 datasets with 100 oberservations. We will run a model on one subsample. It will repeat the process 100 times and then make a final prediction on each observation. Final prediction is a function of each prediction. This final prediction can simply be the mean of each prediction, or we can pick final prediction based on majority rule.
@@ -46,35 +51,143 @@ summary(lm_model_2)
 # prediction of linear model
 prediction_lm <-as.data.frame(predict(lm_model_2, test, type="response"))
 ```
-
-```{r, include=FALSE}
-library(randomForest)
-library(caret)
+Before the following operations, we first deal with the dataset according to the solutions to Challenge A. __Please change the path when you import dataset.__
+```{r}
 # setting the seed
 set.seed(7)
-# train the data using Random Forests technique
-rf <- randomForest(SalePrice ~ MSZoning + LotArea + Neighborhood  + YearBuilt + OverallQual, data = train)
 ```
 
 ```{r}
+# train the data using Random Forests technique
+rf <- randomForest(SalePrice ~ MSZoning + LotArea + Neighborhood  + YearBuilt + OverallQual, data = train)
 rf
-# only show the result of random forests technique
+# show the result of random forests technique
 ```
 ## Step 3
 
 ```{r}
 # making predictions on the test data using Random Forests
 prediction_rf <- predict(rf, test)
+```
+```{r}
 # cobining the predictions from the two models
 predictions <- cbind(prediction_lm, prediction_rf)
 names(predictions) <- c("prediction_lm", "prediction_rf")
 ```
+```{r}
+# comparizing the predictions of the two models
+summary(predictions)
+# visualize them
+ggplot(data = na.omit(predictions)) + geom_density(mapping = aes(x= prediction_lm), color = 'blue') + geom_density(mapping = aes(x= prediction_rf), color = 'black') + xlab(label = "Predictions")
+## These two predictions are very similar.
+```
 
-# Task 3B - Privacy regulation compliance in France
+# Task 2B - Overfitting in Machine Learning (continued)
+
+First we simulate the data and split it into training and testing as we did in Challenge A.
+
+```{r simulate, include=FALSE}
+# Simulating an overfit
+# True model : y = x^3 + epsilon
+set.seed(1)
+Nsim <- 150
+b <- c(0,1)
+x0 <- rep(1, Nsim)
+x1 <- rnorm(n = Nsim)
+
+X <- cbind(x0, x1^3)
+y.true <- X %*% b
+
+eps <- rnorm(n = Nsim)
+y <- X %*% b + eps
+
+df <- tbl_df(y[,1]) %>% rename(y = value) %>% bind_cols(tbl_df(x1)) %>% rename(x = value) %>% bind_cols(tbl_df(y.true[,1])) %>% rename(y.true = value)
+```
+
+
+```{r include=FALSE}
+# Split sample into training and testing, 80/20
+training.index <- createDataPartition(y = y, times = 1, p = 0.8)
+df <- df %>% mutate(which.data = ifelse(1:n() %in% training.index$Resample1, "training", "test"))
+
+training <- df %>% filter(which.data == "training")
+test <- df %>% filter(which.data == "test")
+```
+
+## Step 1:
+```{r}
+# Train local linear model y ~ x on training, using default low flexibility (high bandwidth)
+ll.fit.lowflex <- npreg(y ~ x, data = training, method = "ll", bws = 0.5)
+```
+
+
+## Step 2:
+```{r}
+# Train local linear model y ~ x on training, using default low flexibility (high bandwidth)
+ll.fit.highflex <- npreg(y ~ x, data = training, method = "ll", bws = 0.01)
+```
+
+## Step 3:
+```{r}
+training <- training %>% mutate(y.ll.lowflex = predict(object = ll.fit.lowflex, newdata = training), y.ll.highflex = predict(object = ll.fit.highflex, newdata = training))
+
+ggplot(data = training) + geom_point(mapping = aes(x, y)) + geom_line(mapping = aes(x,y.true))+ geom_line(mapping = aes(x,y.ll.lowflex), color='red') + geom_line(mapping = aes(x,y.ll.highflex), color='blue')
+```
+
+## Step 4:
+The high-flexibility model(blue one) is more variable, and the low-flexibility model(red one) is less biased.
+
+## Step 5:
+```{r}
+test <- test %>% mutate(y.ll.lowflex = predict(object = ll.fit.lowflex, newdata = test), y.ll.highflex = predict(object = ll.fit.highflex, newdata = test))
+ggplot(data = test) + geom_point(mapping = aes(x, y)) + geom_line(mapping = aes(x,y.true))+ geom_line(mapping = aes(x,y.ll.lowflex), color='red') + geom_line(mapping = aes(x,y.ll.highflex), color='blue')
+```
+
+## Step 6:
+```{r}
+# Create vector of several bandwidth
+bw <- seq(0.01, 0.5, by = 0.001)
+```
+
+## Step 7:
+```{r}
+# Train local linear model y ~ x on training with each bandwidth
+llbw.fit <- lapply(X = bw, FUN = function(bw) {npreg(y ~ x, data = training, method = "ll", bws = bw)})
+
+```
+
+## Step 8:
+```{r}
+# Compute for each bandwidth the MSE-training
+mse.training <- function(fit.model){
+  predictions <- predict(object = fit.model, newdata = training)
+  training %>% mutate(squared.error = (y - predictions)^2) %>% summarize(mse = mean(squared.error))
+}
+mse.train.results <- unlist(lapply(X = llbw.fit, FUN = mse.training))
+```
+
+## Step 9:
+```{r}
+# Compute for each bandwidth the MSE-test
+mse.test <- function(fit.model){
+  predictions <- predict(object = fit.model, newdata = test)
+  test %>% mutate(squared.error = (y - predictions)^2) %>% summarize(mse = mean(squared.error))
+}
+mse.test.results <- unlist(lapply(X = llbw.fit, FUN = mse.test))
+```
+
+## Step 10:
+```{r}
+mse.df <- tbl_df(data.frame(bandwidth = bw, mse.train = mse.train.results, mse.test = mse.test.results))
+ggplot(data = mse.df)  + geom_line(mapping = aes(bandwidth, mse.train), color='blue')+ geom_line(mapping = aes(bandwidth, mse.test), color='orange') 
+```
+As the bandwidth increases, the mse on training data always increases. However, the mse on testing data first decreases and then increases as the bandwidth increases.
+
+# Privacy regulation compliance in France
 
 ## Step 1
 ```{r}
-library(data.table)
+## extract the online data through fread
 cnil <- fread('https://www.data.gouv.fr/s/resources/correspondants-informatique-et-libertes-cil/20171115-183631/OpenCNIL_Organismes_avec_CIL_VD_20171115.csv')
 head(cnil)
 ```
@@ -82,42 +195,55 @@ head(cnil)
 ## Step 2
 ```{r}
 # getting the code of department each company belongs to through the first two digits of post code
-library(tidyverse)
 cnil$depart_code <- substr(cnil$Code_Postal, start = 1, stop = 2)
-
 # calculating the number of organizations with CNIL per department
 cnil %>% count(depart_code)
 ```
+
 ## Step 3
-Before importing the large SIREN dataset into R, you need to download it into your computer.  
+__Before importing the SIREN large dataset, please download and extract it.__  
+To import the large dataset, we split it into 4 parts, and import them separately.
+
 ```{r}
+# define the name
 name <- "sirc-17804_9075_14209_201710_L_M_20171101_030132835.csv"
-## First we import the first 500 rows to check the large dataset
-data <- fread(input = name, nrows = 500, header = TRUE)
-dim(data)
-colnames(data)
-# There are 100 variables in this large dataset. actually, we do not need so much information in the following tasks. To finish Step 4, we only need the information of employment size, which is denoted by "TEFET" according to 'http://www.sirene.fr/sirene/public/variable/tefet'. Also, we need the variable "SIREN" and "DATEMAJ". Therefore, we only select the two columns to import.
+# First we import the first 3000000 rows
+data1 <- fread(input = name, nrows = 3000000, header = TRUE)
+col.names<-colnames(data1)
+# merge the siren subset with cnil data
+names(data1)[1] <- 'Siren'
+data1$Siren <- as.integer(data1$Siren)
+combination1 <- left_join(cnil, data1, by='Siren')
+remove(data1)
+col.names_new <- colnames(combination1)
+# we do the similar things in the following steps
+data2 <- fread(input = name, nrows = 3000000,skip = 3000001, header = TRUE,col.names = col.names)
+names(data2)[1] <- 'Siren'
+data2$Siren <- as.integer(data2$Siren)
+combination2 <- left_join(cnil, data2, by='Siren')
+remove(data2)
 
-## import the dataset formally
-col.name <- c('SIREN', 'TEFET', 'DATEMAJ') 
-#define the names of columns we will select
-siren <- fread(input = name, header = TRUE, select = col.name)
-#import the dataset within around 2 mins in my computer.
 
-#siren_new <- siren %>% group_by(SIREN) %>% #slice(which.max(as.Date(DATEMAJ, '%Y-%m-%d')))
+data3 <- fread(input = name, nrows = 3000000,skip = 6000001, header = TRUE,col.names = col.names)
+names(data3)[1] <- 'Siren'
+data3$Siren <- as.integer(data3$Siren)
+combination3 <- left_join(cnil, data3, by='Siren')
+remove(data3)
 
-names(siren)[1] <- 'Siren'
-class(cnil$Siren)
-class(siren$Siren)
-siren$Siren <- as.integer(siren$Siren)
-combination <- left_join(cnil, siren, by='Siren')
-head(combination)
-# combining the two datasets
+data4 <- fread(input = name, nrows = 2831175,skip = 9000001, header = TRUE,col.names = col.names)
+names(data4)[1] <- 'Siren'
+data4$Siren <- as.integer(data4$Siren)
+combination4 <- left_join(cnil, data4, by='Siren')
+remove(data4)
+
+## slecting the most up-to-date rows
+siren_new <- rbind(combination1, combination2, combination3, combination4)
+siren_fin <- siren_new %>% group_by(Siren) %>% slice(which.max(as.Date(DATEMAJ, '%Y-%m-%d')))
 ```
-## Step 4 Plotting
+## Step 4
 ```{r}
-ggplot(data = combination,mapping = aes(x = as.factor(TEFET))) + geom_bar() + labs(x= "Tranche of salaried employees of the establishment", y='Count')
-
+# plotting
+ggplot(data = siren_fin,mapping = aes(x = as.factor(TEFET))) + geom_bar() + labs(x= "Tranche of salaried employees of the establishment", y='Count')
 ```
 You should notice that: 
 NN	Non-employer units  
@@ -135,5 +261,4 @@ NN	Non-employer units
 42	1,000 to 1,999 employees  
 51	2,000 to 4,999 employees  
 52	5,000 to 9,999 employees  
-53	10,000 employees and more  
-
+53	10,000 employees and more 
